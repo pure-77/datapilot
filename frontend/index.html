@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DataPilot — 自然语言问数</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f7fa;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: #fff;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  header h1 { font-size: 18px; font-weight: 600; }
+  header .status { margin-left: auto; font-size: 12px; opacity: 0.8; }
+
+  .chat-area {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .msg {
+    max-width: 80%;
+    padding: 12px 16px;
+    border-radius: 12px;
+    line-height: 1.6;
+  }
+  .msg.user {
+    background: #667eea;
+    color: #fff;
+    align-self: flex-end;
+    border-bottom-right-radius: 4px;
+  }
+  .msg.assistant {
+    background: #fff;
+    color: #333;
+    align-self: flex-start;
+    border-bottom-left-radius: 4px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }
+  .msg.assistant.error {
+    background: #fff2f0;
+    color: #cf1322;
+    border: 1px solid #ffccc7;
+  }
+
+  /* SQL 卡片 */
+  .sql-block {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 12px 16px;
+    border-radius: 8px;
+    font-family: "Fira Code", Consolas, monospace;
+    font-size: 13px;
+    margin: 8px 0;
+    overflow-x: auto;
+    white-space: pre-wrap;
+  }
+  .sql-block .sql-keyword { color: #569cd6; }
+  .sql-block .sql-string { color: #ce9178; }
+  .sql-block .sql-number { color: #b5cea8; }
+
+  /* 结果表格 */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+    font-size: 13px;
+  }
+  th, td {
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid #eee;
+  }
+  th {
+    background: #fafafa;
+    font-weight: 600;
+    color: #555;
+  }
+  tr:hover td { background: #f5f7fa; }
+
+  .node-badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: #e6f7ff;
+    color: #1890ff;
+    margin-right: 6px;
+    font-weight: 500;
+  }
+  .node-badge.run_sql { background: #f6ffed; color: #52c41a; }
+
+  .input-area {
+    padding: 16px 24px;
+    background: #fff;
+    border-top: 1px solid #eee;
+    display: flex;
+    gap: 12px;
+  }
+  .input-area input {
+    flex: 1;
+    padding: 12px 16px;
+    border: 1px solid #d9d9d9;
+    border-radius: 24px;
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .input-area input:focus { border-color: #667eea; }
+  .input-area button {
+    padding: 12px 28px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: #fff;
+    border: none;
+    border-radius: 24px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: opacity 0.2s;
+  }
+  .input-area button:hover { opacity: 0.9; }
+  .input-area button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .typing {
+    display: flex;
+    gap: 4px;
+    padding: 4px 0;
+  }
+  .typing span {
+    width: 8px; height: 8px;
+    background: #bbb;
+    border-radius: 50%;
+    animation: bounce 1.4s infinite ease-in-out;
+  }
+  .typing span:nth-child(2) { animation-delay: 0.2s; }
+  .typing span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes bounce { 0%,80%,100% { transform: scale(0); } 40% { transform: scale(1); } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🔍 DataPilot</h1>
+  <span style="font-size:13px;opacity:0.9;">自然语言问数</span>
+  <span class="status" id="status">连接中...</span>
+</header>
+
+<div class="chat-area" id="chat">
+  <div class="msg assistant">
+    👋 你好！我是 DataPilot 数据分析助手。<br>
+    试试问：<br>
+    • 上个月销量最高的 10 个商品<br>
+    • 华东区和华南区的销售额对比<br>
+    • 2025 年电子产品品类的销量趋势
+  </div>
+</div>
+
+<div class="input-area">
+  <input id="question" type="text" placeholder="输入你的问题..." autocomplete="off">
+  <button id="send">发送</button>
+</div>
+
+<script>
+const API_BASE = 'http://127.0.0.1:8001';
+
+const chat = document.getElementById('chat');
+const input = document.getElementById('question');
+const sendBtn = document.getElementById('send');
+const statusEl = document.getElementById('status');
+
+// 检查后端健康
+fetch(`${API_BASE}/health`).then(r => r.json()).then(d => {
+  statusEl.textContent = '✅ 后端已连接';
+  statusEl.style.color = '#52c41a';
+}).catch(() => {
+  statusEl.textContent = '❌ 后端未启动（请先跑 uvicorn）';
+  statusEl.style.color = '#ff4d4f';
+});
+
+function addMsg(text, role = 'user') {
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  div.innerHTML = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+function renderSQL(sql) {
+  // 简单高亮：关键字、字符串、数字
+  const kw = ['SELECT','FROM','WHERE','AND','OR','ON','JOIN','GROUP BY','ORDER BY','LIMIT','SUM','COUNT','AVG','AS','IN','IS','NULL','NOT','INNER','LEFT','RIGHT','DESC','ASC','BETWEEN','LIKE','DISTINCT'];
+  let highlighted = sql.replace(/(`[^`]+`)/g, '<span style="color:#dcdcaa">$1</span>')
+                       .replace(/('[^']*')/g, '<span class="sql-string">$1</span>')
+                       .replace(/(\d+\.?\d*)/g, '<span class="sql-number">$1</span>');
+  kw.forEach(k => {
+    const re = new RegExp(`\\b${k}\\b`, 'gi');
+    highlighted = highlighted.replace(re, `<span class="sql-keyword">${k}</span>`);
+  });
+  return `<div class="sql-block">${highlighted}</div>`;
+}
+
+function renderTable(columns, rows) {
+  let html = '<table><thead><tr>';
+  columns.forEach(c => html += `<th>${c}</th>`);
+  html += '</tr></thead><tbody>';
+  rows.forEach(row => {
+    html += '<tr>';
+    columns.forEach(c => html += `<td>${row[c]}</td>`);
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  return html;
+}
+
+async function ask(question) {
+  sendBtn.disabled = true;
+  sendBtn.textContent = '分析中...';
+
+  addMsg(question, 'user');
+
+  // typing 动画
+  const typingDiv = document.createElement('div');
+  typingDiv.className = 'msg assistant';
+  typingDiv.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
+  chat.appendChild(typingDiv);
+
+  try {
+    const resp = await fetch(`${API_BASE}/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question })
+    });
+
+    const data = await resp.json();
+    chat.removeChild(typingDiv);
+
+    if (data.error && !data.sql) {
+      // 业务错误（SQL 执行失败）
+      addMsg(`❌ ${data.error}`, 'assistant error');
+      if (data.sql) addMsg(renderSQL(data.sql), 'assistant');
+    } else if (data.sql) {
+      // 成功
+      let html = `<span class="node-badge">SQL</span>好的，我来帮你查询：`;
+      html += renderSQL(data.sql);
+      if (data.result) {
+        const r = data.result;
+        html += `<span class="node-badge run_sql">执行</span>返回 ${r.row_count} 行结果`;
+        html += renderTable(r.columns, r.rows.slice(0, 20));
+        if (r.row_count > 20) html += `<p style="color:#999;font-size:12px;margin-top:8px">（仅显示前 20 行）</p>`;
+      }
+      addMsg(html, 'assistant');
+    } else {
+      addMsg(`⚠️ 未返回 SQL，请检查后端日志`, 'assistant error');
+    }
+  } catch (err) {
+    chat.removeChild(typingDiv);
+    addMsg(`❌ 请求失败：${err.message}<br>请确认后端已在 ${API_BASE} 启动`, 'assistant error');
+  }
+
+  sendBtn.disabled = false;
+  sendBtn.textContent = '发送';
+  input.value = '';
+}
+
+sendBtn.onclick = () => {
+  const q = input.value.trim();
+  if (q) ask(q);
+};
+input.onkeydown = (e) => {
+  if (e.key === 'Enter') sendBtn.click();
+};
+
+// 示例问题
+const examples = [
+  '上个月销量最高的10个商品',
+  '华东区和华南区的销售额对比',
+  '2025年电子产品品类的销量趋势',
+];
+const exDiv = document.createElement('div');
+exDiv.style.cssText = 'margin-top:8px;display:flex;gap:8px;flex-wrap:wrap';
+examples.forEach(q => {
+  const b = document.createElement('button');
+  b.textContent = '💡 ' + q;
+  b.style.cssText = 'font-size:12px;padding:6px 12px;border:1px solid #d9d9d9;border-radius:16px;background:#fff;cursor:pointer;color:#555';
+  b.onclick = () => { input.value = q; ask(q); };
+  exDiv.appendChild(b);
+});
+chat.appendChild(exDiv);
+</script>
+</body>
+</html>
