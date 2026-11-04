@@ -7,8 +7,8 @@ from typing import Any
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage
 
-from ...core.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, DUCKDB_PATH
-from ...core.schema_loader import get_schema_text
+from ...core.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+from ...core.mcp_client import build_schema_text_cached
 
 # System Prompt 模板
 SYSTEM_PROMPT_TEMPLATE = """你是一个专业的数据分析 SQL 助手。
@@ -62,8 +62,8 @@ def text2sql_node(state: dict) -> dict[str, Any]:
         - schema_text: 注入给 LLM 的表结构
         - generated_sql: 生成的 SQL
     """
-    # 1. 加载表结构（第一次用时加载，之后缓存可以加，但 M1 先每次读）
-    schema_text = get_schema_text(DUCKDB_PATH)
+    # 1. 通过 MCP Server 加载表结构（build_schema_text_cached 带 lru_cache）
+    schema_text = build_schema_text_cached()
 
     # 2. 构建 LLM 和 Prompt
     llm = _build_llm()

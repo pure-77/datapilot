@@ -1,12 +1,14 @@
 """
-DataPilot 一键启动脚本
+DataPilot 一键启动脚本（MCP 化版本）
 
     .venv\\Scripts\\python.exe start_web.py
 
-启动两个服务并自动打开浏览器：
-    backend  : uvicorn app.main:app  http://127.0.0.1:8001
-    frontend : http.server            http://127.0.0.1:5500/index.html
+启动三个服务并自动打开浏览器：
+    mcp_server : FastMCP streamable-http  http://127.0.0.1:8081/mcp
+    backend    : uvicorn app.main:app      http://127.0.0.1:8001
+    frontend   : http.server               http://127.0.0.1:5500/index.html
 
+启动顺序: MCP → Backend → Frontend（后端 LangGraph 节点通过 MCP Server 取数）
 按 Ctrl+C 停止。
 """
 from __future__ import annotations
@@ -23,6 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 BACKEND_DIR = ROOT / "backend"
 FRONTEND_DIR = ROOT / "frontend"
+MCP_PORT = 8081
 BACKEND_PORT = 8001
 FRONTEND_PORT = 5500
 
@@ -41,6 +44,16 @@ def port_in_use(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def wait_for_port(port: int, timeout: int = 15) -> bool:
+    """等待指定端口监听（MCP 用）"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if port_in_use(port):
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def wait_for_backend(port: int, timeout: int = 30) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -57,40 +70,57 @@ def main() -> int:
     py = get_python()
 
     print("=" * 54)
-    print("  DataPilot")
-    print(f"    backend   : http://127.0.0.1:{BACKEND_PORT}")
-    print(f"    frontend  : http://127.0.0.1:{FRONTEND_PORT}/index.html")
+    print("  DataPilot  (MCP 化版本)")
+    print(f"    mcp_server : http://127.0.0.1:{MCP_PORT}/mcp")
+    print(f"    backend    : http://127.0.0.1:{BACKEND_PORT}")
+    print(f"    frontend   : http://127.0.0.1:{FRONTEND_PORT}/index.html")
     print(f"    interpreter: {py}")
     print("=" * 54)
 
     procs: list[subprocess.Popen] = []
 
-    if port_in_use(BACKEND_PORT):
-        print(f"[1/3] 端口 {BACKEND_PORT} 已被占用，跳过后端启动")
+    # ---- 1. MCP Server（最先启动，后端依赖它）----
+    if port_in_use(MCP_PORT):
+        print(f"[1/4] 端口 {MCP_PORT} 已被占用，跳过 MCP Server 启动")
     else:
-        print(f"[1/3] 启动后端 ...")
+        print(f"[1/4] 启动 MCP Server ...")
+        p = subprocess.Popen(
+            [py, "-m", "app.mcp_server.server"],
+            cwd=str(BACKEND_DIR),
+        )
+        procs.append(p)
+        if not wait_for_port(MCP_PORT, timeout=15):
+            print("      [警告] MCP Server 15 秒内未就绪")
+
+    # ---- 2. Backend ----
+    if port_in_use(BACKEND_PORT):
+        print(f"[2/4] 端口 {BACKEND_PORT} 已被占用，跳过后端启动")
+    else:
+        print(f"[2/4] 启动后端 ...")
         procs.append(subprocess.Popen(
             [py, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(BACKEND_PORT)],
             cwd=str(BACKEND_DIR),
         ))
 
+    # ---- 3. Frontend ----
     if port_in_use(FRONTEND_PORT):
-        print(f"[2/3] 端口 {FRONTEND_PORT} 已被占用，跳过前端启动")
+        print(f"[3/4] 端口 {FRONTEND_PORT} 已被占用，跳过前端启动")
     else:
-        print(f"[2/3] 启动前端 ...")
+        print(f"[3/4] 启动前端 ...")
         procs.append(subprocess.Popen(
             [py, "-m", "http.server", str(FRONTEND_PORT), "--bind", "127.0.0.1"],
             cwd=str(FRONTEND_DIR),
         ))
 
-    print("[3/3] 等待后端就绪 ...")
+    # ---- 4. 等后端就绪 + 打开浏览器 ----
+    print("[4/4] 等待后端就绪 ...")
     if wait_for_backend(BACKEND_PORT):
         print("      后端已就绪")
         webbrowser.open(f"http://127.0.0.1:{FRONTEND_PORT}/index.html")
     else:
         print("      [警告] 后端 30 秒内未就绪，请查看上方日志")
 
-    print("\n服务运行中，按 Ctrl+C 停止。")
+    print("\n三个服务运行中，按 Ctrl+C 停止。")
 
     try:
         while True:
