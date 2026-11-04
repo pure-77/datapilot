@@ -67,7 +67,22 @@ def text2sql_node(state: dict) -> dict[str, Any]:
 
     # 2. 构建 LLM 和 Prompt
     llm = _build_llm()
-    system_msg = SystemMessage(content=SYSTEM_PROMPT_TEMPLATE.format(schema_text=schema_text))
+    prompt = SYSTEM_PROMPT_TEMPLATE.format(schema_text=schema_text)
+
+    # 重试时把上一次校验失败的根因错误注入，让 LLM 自我修正
+    validation_errors = state.get("validation_errors") or []
+    if validation_errors:
+        last_sql = state.get("generated_sql", "")
+        prompt += f"""
+## ⚠️ 上一次生成未通过安全校验
+
+上一次生成的 SQL:
+{last_sql}
+
+校验失败原因（必须修正）:
+""" + "\n".join(f"- {e}" for e in validation_errors) + "\n\n请根据错误原因重新生成合规的 SQL。\n"
+
+    system_msg = SystemMessage(content=prompt)
 
     # 只传 system + 最后一条用户消息（M1 暂不做多轮上下文）
     user_msg = state["messages"][-1]
