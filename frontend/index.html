@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DataPilot — 自然语言问数</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -23,6 +24,11 @@
   }
   header h1 { font-size: 18px; font-weight: 600; }
   header .status { margin-left: auto; font-size: 12px; opacity: 0.8; }
+  header .new-session {
+    font-size: 12px; padding: 4px 12px; border: 1px solid rgba(255,255,255,0.5);
+    border-radius: 12px; background: transparent; color: #fff; cursor: pointer;
+  }
+  header .new-session:hover { background: rgba(255,255,255,0.15); }
 
   .chat-area {
     flex: 1;
@@ -73,6 +79,33 @@
   .sql-block .sql-string { color: #ce9178; }
   .sql-block .sql-number { color: #b5cea8; }
 
+  /* 审核卡片 */
+  .approval-card {
+    border: 1px solid #ffe58f;
+    background: #fffbe6;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-top: 8px;
+  }
+  .approval-card .title {
+    font-weight: 600; color: #ad6800; margin-bottom: 8px; font-size: 14px;
+  }
+  .approval-card .actions { display: flex; gap: 10px; margin-top: 10px; }
+  .approval-card button {
+    padding: 7px 20px; border: none; border-radius: 6px; cursor: pointer;
+    font-size: 13px; font-weight: 500;
+  }
+  .btn-approve { background: #52c41a; color: #fff; }
+  .btn-reject { background: #ff4d4f; color: #fff; }
+  .btn-modify { background: #1890ff; color: #fff; }
+  .approval-card textarea {
+    width: 100%; min-height: 110px; margin-top: 10px; padding: 10px;
+    font-family: Consolas, monospace; font-size: 13px; border: 1px solid #d9d9d9;
+    border-radius: 6px; resize: vertical;
+  }
+  .approval-card.resolved { opacity: 0.7; }
+  .approval-card.resolved .actions, .approval-card.resolved textarea { display: none; }
+
   /* 结果表格 */
   table {
     width: 100%;
@@ -85,12 +118,15 @@
     text-align: left;
     border-bottom: 1px solid #eee;
   }
-  th {
-    background: #fafafa;
-    font-weight: 600;
-    color: #555;
-  }
+  th { background: #fafafa; font-weight: 600; color: #555; }
   tr:hover td { background: #f5f7fa; }
+
+  .chart-box { width: 100%; height: 320px; margin-top: 10px; }
+
+  .report-block {
+    margin-top: 10px; padding: 12px 14px; background: #f6ffed;
+    border-left: 3px solid #52c41a; border-radius: 0 8px 8px 0; font-size: 14px;
+  }
 
   .node-badge {
     display: inline-block;
@@ -103,6 +139,8 @@
     font-weight: 500;
   }
   .node-badge.run_sql { background: #f6ffed; color: #52c41a; }
+  .node-badge.check { background: #fff7e6; color: #fa8c16; }
+  .node-badge.chart { background: #f9f0ff; color: #722ed1; }
 
   .input-area {
     padding: 16px 24px;
@@ -135,11 +173,7 @@
   .input-area button:hover { opacity: 0.9; }
   .input-area button:disabled { opacity: 0.5; cursor: not-allowed; }
 
-  .typing {
-    display: flex;
-    gap: 4px;
-    padding: 4px 0;
-  }
+  .typing { display: flex; gap: 4px; padding: 4px 0; }
   .typing span {
     width: 8px; height: 8px;
     background: #bbb;
@@ -155,13 +189,15 @@
 
 <header>
   <h1>🔍 DataPilot</h1>
-  <span style="font-size:13px;opacity:0.9;">自然语言问数</span>
+  <span style="font-size:13px;opacity:0.9;">多 Agent 智能问数 · Human-in-the-loop</span>
+  <button class="new-session" id="newSession">＋ 新会话</button>
   <span class="status" id="status">连接中...</span>
 </header>
 
 <div class="chat-area" id="chat">
   <div class="msg assistant">
-    👋 你好！我是 DataPilot 数据分析助手。<br>
+    👋 你好！我是 DataPilot 数据分析助手（M2 多 Agent 版）。<br>
+    每条 SQL 都会经过 <b>sqlglot 安全校验</b> 并等你<b>人工确认</b>后才执行。<br>
     试试问：<br>
     • 上个月销量最高的 10 个商品<br>
     • 华东区和华南区的销售额对比<br>
@@ -182,30 +218,57 @@ const input = document.getElementById('question');
 const sendBtn = document.getElementById('send');
 const statusEl = document.getElementById('status');
 
-// 检查后端健康
-fetch(`${API_BASE}/health`).then(r => r.json()).then(d => {
+// ---- 会话持久化：thread_id 存 localStorage，刷新页面可断点续聊 ----
+let threadId = localStorage.getItem('dp_thread_id') || null;
+function saveThread(id) { threadId = id; localStorage.setItem('dp_thread_id', id); }
+document.getElementById('newSession').onclick = () => {
+  localStorage.removeItem('dp_thread_id');
+  threadId = null;
+  chat.innerHTML = '<div class="msg assistant">已开启新会话 👋</div>';
+};
+
+// 健康检查
+fetch(`${API_BASE}/health`).then(r => r.json()).then(() => {
   statusEl.textContent = '✅ 后端已连接';
   statusEl.style.color = '#52c41a';
 }).catch(() => {
-  statusEl.textContent = '❌ 后端未启动（请先跑 uvicorn）';
+  statusEl.textContent = '❌ 后端未启动';
   statusEl.style.color = '#ff4d4f';
 });
 
-function addMsg(text, role = 'user') {
+// 刷新恢复：若当前 thread 有待确认的 interrupt，重新渲染审核卡片（断点续聊）
+if (threadId) {
+  fetch(`${API_BASE}/state?thread_id=${threadId}`).then(r => r.json()).then(d => {
+    if (d.pending) {
+      const bubble = addMsg('<div style="color:#888;font-size:13px">🔄 检测到上次未完成的确认：</div>', 'assistant');
+      renderApprovalCard(bubble, d.interrupt);
+    }
+  }).catch(() => {});
+}
+
+function addMsg(html, role = 'user') {
   const div = document.createElement('div');
   div.className = `msg ${role}`;
-  div.innerHTML = text;
+  div.innerHTML = html;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+function showTyping() {
+  const div = document.createElement('div');
+  div.className = 'msg assistant';
+  div.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
   return div;
 }
 
 function renderSQL(sql) {
-  // 简单高亮：关键字、字符串、数字
-  const kw = ['SELECT','FROM','WHERE','AND','OR','ON','JOIN','GROUP BY','ORDER BY','LIMIT','SUM','COUNT','AVG','AS','IN','IS','NULL','NOT','INNER','LEFT','RIGHT','DESC','ASC','BETWEEN','LIKE','DISTINCT'];
-  let highlighted = sql.replace(/(`[^`]+`)/g, '<span style="color:#dcdcaa">$1</span>')
+  const kw = ['SELECT','FROM','WHERE','AND','OR','ON','JOIN','GROUP BY','ORDER BY','LIMIT','SUM','COUNT','AVG','AS','IN','IS','NULL','NOT','INNER','LEFT','RIGHT','DESC','ASC','BETWEEN','LIKE','DISTINCT','WITH','CAST','INTERVAL'];
+  let highlighted = sql.replace(/&/g,'&amp;').replace(/</g,'&lt;')
                        .replace(/('[^']*')/g, '<span class="sql-string">$1</span>')
-                       .replace(/(\d+\.?\d*)/g, '<span class="sql-number">$1</span>');
+                       .replace(/\b(\d+\.?\d*)\b/g, '<span class="sql-number">$1</span>');
   kw.forEach(k => {
     const re = new RegExp(`\\b${k}\\b`, 'gi');
     highlighted = highlighted.replace(re, `<span class="sql-keyword">${k}</span>`);
@@ -226,54 +289,173 @@ function renderTable(columns, rows) {
   return html;
 }
 
+// ---- SSE 消费（fetch reader，支持 POST）----
+async function consumeSSE(resp, onEvent) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 2);
+      if (line.startsWith('data: ')) {
+        try { onEvent(JSON.parse(line.slice(6))); } catch (e) { console.error(e); }
+      }
+    }
+  }
+}
+
+// ---- 审核卡片 ----
+function renderApprovalCard(container, payload) {
+  const card = document.createElement('div');
+  card.className = 'approval-card';
+  card.innerHTML = `
+    <div class="title">⚠️ SQL 待确认（校验已通过）</div>
+    ${renderSQL(payload.sql)}
+    <div class="actions">
+      <button class="btn-approve">✓ 批准执行</button>
+      <button class="btn-modify">✎ 修改 SQL</button>
+      <button class="btn-reject">✗ 拒绝</button>
+    </div>
+  `;
+  container.appendChild(card);
+  chat.scrollTop = chat.scrollHeight;
+
+  const resolve = (label) => {
+    card.classList.add('resolved');
+    card.querySelector('.title').textContent = label;
+  };
+
+  card.querySelector('.btn-approve').onclick = () => { resolve('✅ 已批准，执行中...'); resume({ action: 'approve' }, container); };
+  card.querySelector('.btn-reject').onclick = () => { resolve('🚫 已拒绝'); resume({ action: 'reject', reason: '用户拒绝了 SQL 执行' }, container); };
+  card.querySelector('.btn-modify').onclick = () => {
+    if (card.querySelector('textarea')) return;
+    const ta = document.createElement('textarea');
+    ta.value = payload.sql;
+    card.appendChild(ta);
+    const btnRow = card.querySelector('.actions');
+    const confirmBtn = document.createElement('button');
+    confirmBtn.className = 'btn-modify';
+    confirmBtn.textContent = '✓ 用修改后的 SQL 执行';
+    btnRow.innerHTML = '';
+    btnRow.appendChild(confirmBtn);
+    confirmBtn.onclick = () => {
+      const sql = ta.value.trim();
+      if (!sql) return alert('SQL 不能为空');
+      resolve('✅ 已按修改后的 SQL 执行');
+      resume({ action: 'modify', sql }, container);
+    };
+  };
+}
+
+// ---- resume 后续事件渲染 ----
+function renderNodeEvent(e, container) {
+  const name = e.node, out = e.output || {};
+
+  if (name === 'run_sql') {
+    if (out.sql_error) { addMsg(`❌ ${out.sql_error}`, 'assistant error'); return; }
+    const r = out.sql_result;
+    let html = `<span class="node-badge run_sql">执行</span>返回 ${r.row_count} 行结果`;
+    html += renderTable(r.columns, r.rows.slice(0, 20));
+    if (r.row_count > 20) html += `<p style="color:#999;font-size:12px;margin-top:8px">（仅显示前 20 行）</p>`;
+    container.insertAdjacentHTML('beforeend', html);
+  } else if (name === 'chart' && out.chart_spec && out.chart_spec.series) {
+    const box = document.createElement('div');
+    box.className = 'chart-box';
+    container.appendChild(box);
+    const inst = echarts.init(box);
+    inst.setOption(out.chart_spec);
+  } else if (name === 'report' && out.report) {
+    container.insertAdjacentHTML('beforeend',
+      `<div class="report-block"><span class="node-badge chart">报告</span>${out.report.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')}</div>`);
+  } else if (name === 'chat_reply' && out.chat_reply) {
+    container.insertAdjacentHTML('beforeend', out.chat_reply);
+  } else if (name === 'sql_check' && out.validation_errors && out.validation_errors.length) {
+    container.insertAdjacentHTML('beforeend',
+      `<div style="color:#fa8c16;font-size:13px;margin-top:6px">⚠️ 校验未通过（自动重试中）：${out.validation_errors[out.validation_errors.length-1]}</div>`);
+  }
+}
+
+// ---- 主流程：发起问数 ----
 async function ask(question) {
   sendBtn.disabled = true;
   sendBtn.textContent = '分析中...';
-
   addMsg(question, 'user');
+  const typing = showTyping();
 
-  // typing 动画
-  const typingDiv = document.createElement('div');
-  typingDiv.className = 'msg assistant';
-  typingDiv.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
-  chat.appendChild(typingDiv);
+  // 每次回答新建一条 assistant 气泡容器
+  let bubble = null;
+  const ensureBubble = () => {
+    if (!bubble) { typing.remove(); bubble = addMsg('', 'assistant'); }
+    return bubble;
+  };
 
   try {
-    const resp = await fetch(`${API_BASE}/ask`, {
+    const resp = await fetch(`${API_BASE}/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question })
+      body: JSON.stringify({ question, thread_id: threadId })
     });
 
-    const data = await resp.json();
-    chat.removeChild(typingDiv);
+    await consumeSSE(resp, (e) => {
+      if (e.thread_id) saveThread(e.thread_id);
+      if (e.error) { ensureBubble().innerHTML += `❌ ${e.error}`; return; }
 
-    if (data.error && !data.sql) {
-      // 业务错误（SQL 执行失败）
-      addMsg(`❌ ${data.error}`, 'assistant error');
-      if (data.sql) addMsg(renderSQL(data.sql), 'assistant');
-    } else if (data.sql) {
-      // 成功
-      let html = `<span class="node-badge">SQL</span>好的，我来帮你查询：`;
-      html += renderSQL(data.sql);
-      if (data.result) {
-        const r = data.result;
-        html += `<span class="node-badge run_sql">执行</span>返回 ${r.row_count} 行结果`;
-        html += renderTable(r.columns, r.rows.slice(0, 20));
-        if (r.row_count > 20) html += `<p style="color:#999;font-size:12px;margin-top:8px">（仅显示前 20 行）</p>`;
+      if (e.node === 'interrupt') {
+        const b = ensureBubble();
+        renderApprovalCard(b, e.output);
+        return;
       }
-      addMsg(html, 'assistant');
-    } else {
-      addMsg(`⚠️ 未返回 SQL，请检查后端日志`, 'assistant error');
-    }
+      if (e.node === 'supervisor') {
+        const intentMap = { chat: '闲聊', query: '查数', report: '报告' };
+        ensureBubble().innerHTML = `<span class="node-badge">意图</span>识别为「${intentMap[e.output.intent] || e.output.intent}」`;
+        return;
+      }
+      if (e.node === 'text2sql') {
+        ensureBubble().insertAdjacentHTML('beforeend', renderSQL(e.output.generated_sql));
+        return;
+      }
+      if (e.node === 'sql_check' && (!e.output.validation_errors || !e.output.validation_errors.length)) {
+        ensureBubble().insertAdjacentHTML('beforeend', `<div style="color:#52c41a;font-size:13px;margin-top:4px">✅ sqlglot 安全校验通过</div>`);
+        return;
+      }
+      if (e.node === 'done') return;
+      renderNodeEvent(e, ensureBubble());
+      chat.scrollTop = chat.scrollHeight;
+    });
   } catch (err) {
-    chat.removeChild(typingDiv);
-    addMsg(`❌ 请求失败：${err.message}<br>请确认后端已在 ${API_BASE} 启动`, 'assistant error');
+    typing.remove();
+    addMsg(`❌ 请求失败：${err.message}`, 'assistant error');
   }
 
+  typing.remove();
   sendBtn.disabled = false;
   sendBtn.textContent = '发送';
   input.value = '';
+  chat.scrollTop = chat.scrollHeight;
+}
+
+// ---- 人工确认后恢复 ----
+async function resume(payload, container) {
+  try {
+    const resp = await fetch(`${API_BASE}/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ thread_id: threadId, ...payload })
+    });
+    await consumeSSE(resp, (e) => {
+      if (e.error) { addMsg(`❌ ${e.error}`, 'assistant error'); return; }
+      if (e.node === 'done' || e.node === 'wait_approval') return;
+      renderNodeEvent(e, container);
+      chat.scrollTop = chat.scrollHeight;
+    });
+  } catch (err) {
+    addMsg(`❌ 恢复失败：${err.message}`, 'assistant error');
+  }
 }
 
 sendBtn.onclick = () => {
@@ -288,7 +470,7 @@ input.onkeydown = (e) => {
 const examples = [
   '上个月销量最高的10个商品',
   '华东区和华南区的销售额对比',
-  '2025年电子产品品类的销量趋势',
+  '各品类商品的销售额占比分析报告',
 ];
 const exDiv = document.createElement('div');
 exDiv.style.cssText = 'margin-top:8px;display:flex;gap:8px;flex-wrap:wrap';
